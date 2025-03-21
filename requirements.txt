@@ -1,0 +1,5 @@
+rich>=10.0.0
+pyfiglet>=0.8.post1
+requests>=2.28.0
+python-docx>=0.8.11  # 处理Word文档
+markdown>=3.3.0  # 处理Markdown文本 
