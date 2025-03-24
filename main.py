@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt, IntPrompt, Confirm
 from rich.table import Table
 from rich.text import Text
+from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from ai import DeepSeekAI, AIError
 
@@ -81,7 +82,7 @@ def show_loading_animation(duration=1.5):
     with console.status("[bold blue]正在初始化AI引擎...", spinner="dots"):
         time.sleep(duration)
 
-def save_report_to_file(content, topic, format="markdown", prefix=""):
+def save_report_to_file(content, topic, prefix=""):
     """
     保存报告到文件
     
@@ -103,7 +104,7 @@ def save_report_to_file(content, topic, format="markdown", prefix=""):
     safe_topic = safe_topic.replace(" ", "_")
     
     # 生成文件名 - 简化为仅使用主题名称
-    extension = ".md" if format.lower() == "markdown" else ".txt"
+    extension = ".md"
     
     if prefix:
         filename = f"{prefix}_{safe_topic}{extension}"
@@ -201,24 +202,21 @@ def main():
     # 检查Pandoc是否已安装
     try:
         subprocess.run(["pandoc", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        pandoc_installed = True
     except (subprocess.SubprocessError, FileNotFoundError):
-        pandoc_installed = False
         console.print("[yellow]注意: 未检测到Pandoc，无法转换为Word文档[/yellow]")
         console.print("[cyan]您可以从 https://pandoc.org/installing.html 安装Pandoc来启用Markdown到Word的转换功能[/cyan]")
     
     # 直接进入报告生成流程
     while True:
         clear_screen()
-        print_logo()
-        
         console.print("[bold green]AI报告生成器已准备就绪！[/bold green]\n")
         
-        # 仅获取必要的输入 - 主题和页数
+        # 获取报告主题
         console.print("[yellow]请输入报告的主题：[/yellow]")
         topic = Prompt.ask("[bold cyan]主题", default="未指定主题")
         
-        console.print("\n[yellow]请输入期望的页数 (1-100)：[/yellow]")
+        # 添加页数的输入选项
+        console.print("\n[yellow]请输入报告页数 (1-100)：[/yellow]")
         pages = IntPrompt.ask(
             "[bold cyan]页数", 
             default=5,
@@ -226,18 +224,8 @@ def main():
             show_choices=False
         )
         
-        # 添加线程数量的输入选项
-        console.print("\n[yellow]请输入线程数量 (1-10)：[/yellow]")
-        console.print("[dim]提示：线程数越多生成速度越快，但可能会增加API调用频率限制风险[/dim]")
-        max_workers = IntPrompt.ask(
-            "[bold cyan]线程数", 
-            default=5,
-            choices=[str(i) for i in range(1, 11)],
-            show_choices=False
-        )
-        
-        # 固定使用markdown格式
-        output_format = "markdown"
+        # 创建模型参数字典，用于传递给AI客户端
+        model_params = {}
         
         # 检查API密钥
         api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -254,7 +242,7 @@ def main():
         try:
             # 初始化AI客户端
             console.print("[cyan]正在初始化AI引擎...[/cyan]")
-            ai_client = DeepSeekAI(api_key=api_key, max_workers=max_workers)
+            ai_client = DeepSeekAI(api_key=api_key)
             
             # 记录起始时间
             start_time = time.time()
@@ -264,11 +252,10 @@ def main():
                 toc = ai_client.generate_report_toc(
                     topic=topic,
                     pages=pages,
-                    format=output_format
                 )
             
             # 保存目录并显示
-            toc_filepath = save_report_to_file(toc, topic, format=output_format, prefix="TOC")
+            toc_filepath = save_report_to_file(toc, topic, prefix="TOC")
             console.print(f"\n[bold green]✅ 目录已生成并保存至: [/bold green][cyan]{toc_filepath}[/cyan]")
             
             # 显示目录预览
@@ -284,36 +271,73 @@ def main():
             # 解析章节
             sections = ai_client.parse_toc(toc)
             console.print(f"[cyan]共发现 {len(sections)} 个章节[/cyan]")
-            
+
             # 直接开始生成
-            console.print("\n[bold green]🚀 开始多线程生成章节内容...[/bold green]")
+            console.print("\n[bold green]🚀 开始生成章节内容...[/bold green]")
             
-            # 定义进度回调
-            def progress_callback(current, total, section):
-                percent = (current / total) * 100
-                console.print(f"[cyan]进度: [{current}/{total}] {percent:.1f}% - 当前: {section}[/cyan]")
-            
-            # 使用完全并行模式生成（最大化速度）
-            with console.status("[bold blue]🧠 AI引擎正在生成报告内容...", spinner="dots"):
-                 report_content = ai_client.generate_full_report_parallel(
-                    topic=topic,
-                    pages=pages,
-                    sections = sections,
-                    toc = toc,
-                    format=output_format,
-                    max_workers=max_workers,
-                    progress_callback=progress_callback
-                )
+            # 使用顺序模式生成报告
+            try:
+                # 修改进度条初始化和跟踪方式
+                with Progress(
+                    TextColumn("[bold blue]{task.description}"),
+                    BarColumn(bar_width=40),
+                    TaskProgressColumn(),
+                    "[cyan]{task.completed}/{task.total}",
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                    console=console
+                ) as progress:
+                    # 显示报告生成的总体信息
+                    console.print(f"[blue]章节信息: 共 {len(sections)} 个章节[/blue]")
+                    console.print(
+                        f"[bold]开始生成报告[/bold]: {topic}\n"
+                        f"目标页数: {pages} 页 | 章节数量: {len(sections)} 个",
+                        style="blue"
+                    )
+                    
+                    # 添加一个任务占位符，设置总数为章节数量
+                    task_id = progress.add_task("[cyan]生成报告章节...", total=len(sections))
+                    
+                    # 修改回调函数以使用已创建的进度条
+                    def progress_callback(current, total, section):
+                        # 更新进度和描述，使用更简洁的描述格式
+                        progress.update(
+                            task_id, 
+                            completed=current,
+                            description=f"[cyan]生成报告章节 {current}/{total}"
+                        )
+                        
+                        # 单独在进度条下方显示当前处理的章节名称
+                        if current > 0:
+                            progress.console.print(f"[green]✓ 已完成章节 {current}/{total}[/green]: {section}")
+                    
+                    # 生成报告
+                    report_content = ai_client.generate_full_report(
+                        topic=topic,
+                        pages=pages,
+                        sections=sections,
+                        toc=toc,
+                        progress_callback=progress_callback,
+                        **model_params
+                    )
+            except Exception as e:
+                console.print(f"[bold red]生成报告过程中出错: {e}[/bold red]")
+                raise
             
             # 计算生成耗时
             end_time = time.time()
             elapsed = end_time - start_time
             
+            # 格式化时间显示（分钟:秒）
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            time_format = f"{minutes}分{seconds}秒" if minutes > 0 else f"{seconds}秒"
+            
             # 显示生成时间
-            console.print(f"\n[bold green]🕒 报告生成完成！耗时: {elapsed:.2f}秒[/bold green]")
+            console.print(f"\n[bold green]🕒 报告生成完成！耗时: {time_format}[/bold green]")
             
             # 保存Markdown格式报告
-            md_filepath = save_report_to_file(report_content, topic, format=output_format)
+            md_filepath = save_report_to_file(report_content, topic)
             console.print(f"[cyan]Markdown报告已保存至: [bold]{md_filepath}[/bold][/cyan]")
             
             # 转换为Word文档

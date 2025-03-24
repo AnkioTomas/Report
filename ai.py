@@ -5,21 +5,18 @@
 AI工具类 - 提供与DeepSeek API通信的功能
 """
 
-import os
-import time
-import json
-import random
-import requests
-import threading
 import concurrent.futures
+import json
 import multiprocessing
-from typing import Dict, Any, List, Optional, Union, Callable, Tuple
+import os
+import random
+import threading
+import time
 from functools import wraps
+from typing import Dict, Any, List, Optional, Callable
+
+import requests
 from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
-from rich.text import Text
-from rich.emoji import Emoji
 
 # 初始化Rich控制台
 console = Console()
@@ -88,7 +85,7 @@ class DeepSeekAI:
     
     BASE_URL = "https://api.deepseek.com/v1"
     
-    def __init__(self, api_key: Optional[str] = None, max_workers: Optional[int] = None):
+    def __init__(self, api_key: Optional[str] = None):
         """
         初始化DeepSeek API客户端
         
@@ -108,18 +105,7 @@ class DeepSeekAI:
         
         # 线程安全的存储
         self._session_lock = threading.RLock()
-        
-        # 确定最大线程数：如果未提供，则根据CPU核心数自动确定
-        if max_workers is None:
-            # 获取CPU核心数
-            cpu_count = multiprocessing.cpu_count()
-            # 设置为CPU核心数的1-2倍 (根据经验值，I/O密集型任务适合使用CPU核心数的1-2倍线程)
-            # 对于API调用这类I/O密集型任务，线程数可以稍多于CPU核心数
-            # 至少使用2个线程，最多使用16个线程避免过度并行
-            self.max_workers = max(2, min(cpu_count * 2, 16))
-            console.print(f"[blue]自动设置线程数: {self.max_workers} (基于 {cpu_count} 个CPU核心)[/blue]")
-        else:
-            self.max_workers = max(1, max_workers)  # 确保至少有1个线程
+
     
     def _handle_error(self, response: requests.Response) -> None:
         """
@@ -200,7 +186,6 @@ class DeepSeekAI:
         self,
         topic: str,
         pages: int,
-        format: str = "markdown",
         extra_instructions: Optional[str] = None,
         **kwargs
     ) -> str:
@@ -256,12 +241,11 @@ class DeepSeekAI:
         topic: str,
         section_title: str,
         toc: str,
-        format: str = "markdown",
         previous_sections: Optional[List[str]] = None,
-        target_word_count: Optional[int] = None,
         section_index: Optional[int] = None,
         total_sections: Optional[int] = None,
         pages: Optional[int] = None,
+        target_word_count: Optional[int] = None,
         **kwargs
     ) -> str:
         """
@@ -273,10 +257,10 @@ class DeepSeekAI:
             toc (str): 完整的目录内容
             format (str): 输出格式 ("markdown", "text")
             previous_sections (List[str], optional): 之前已生成的章节
-            target_word_count (int, optional): 目标字数，如果提供则尝试生成该字数的内容
             section_index (int, optional): 当前章节索引
             total_sections (int, optional): 总章节数
             pages (int, optional): 报告目标页数
+            target_word_count (int, optional): 目标字数
             **kwargs: 传递给generate_text的其他参数
             
         返回:
@@ -338,7 +322,7 @@ class DeepSeekAI:
 
 要求:
 1. 内容应该学术且专业
-2. 使用{format}格式进行排版
+2. 使用markdown格式进行排版
 3. 内容应基于最新的研究和事实
 4. 只生成当前章节的内容，不要生成其他章节
 5. 保持与报告整体结构的一致性
@@ -350,10 +334,10 @@ class DeepSeekAI:
 11. 不要在内容中重复章节标题或再次列出子章节结构
 
 格式说明:
-- 如果你正在生成顶级章节(如"1. 引言")，请直接从其内容开始，无需再写"# 1. 引言"这样的标题
-- 如果当前章节包含子章节，请按目录结构直接生成子章节内容，无需重复创建目录中已有的结构
+- 请直接开始生成章节内容，不要包含任何章节标题（标题将由系统自动生成）
+- 如果当前章节包含子章节，按目录结构直接组织内容，无需输出子章节的标题
 - 不要在同一章节内使用不同级别的标题来重复相同的内容
-- 直接输出内容，不要有任何解释
+- 直接输出内容，不要添加任何解释
 """
 
         if context:
@@ -367,82 +351,62 @@ class DeepSeekAI:
         try:
             # 提取生成的内容
             content = response["choices"][0]["message"]["content"]
-            
-            # 后处理内容，检测并移除可能的重复章节
-           # processed_content = self._remove_duplicate_sections(content, section_title)
-            
+
             return content
         except (KeyError, IndexError) as e:
             raise AIError(f"处理API响应时出错: {str(e)}")
-            
-    def _remove_duplicate_sections(self, content: str, section_title: str) -> str:
+
+    def get_chapter_level(self, section_title: str) -> int:
         """
-        检测并移除内容中可能重复的章节
+        获取章节标题的层级
         
         参数:
-            content (str): 生成的章节内容
-            section_title (str): 当前章节标题
+            section_title (str): 章节标题
             
         返回:
-            str: 处理后的内容
+            int: 章节层级 (1-5)，如果无法识别则返回0
         """
-        # 检测章节可能的重复模式
-        lines = content.split('\n')
+        # 导入正则表达式库
+        import re
         
-        # 移除可能重复的章节标题
-        # 例如: 如果内容以"# 章节标题"或"## 章节标题"开头，则移除这一行
-        clean_section_title = section_title.strip()
-        if clean_section_title.startswith(('1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')):
-            # 提取数字部分 (例如: '1.1' 从 '1.1 研究背景')
-            title_parts = clean_section_title.split(' ', 1)
-            if len(title_parts) > 1:
-                number_part = title_parts[0]
-                clean_section_title = title_parts[1]
+        # 清理标题前后的空白字符
+        clean_title = section_title.strip()
         
-        filtered_lines = []
-        skip_next = False
+        # 需要按照从最具体到最不具体的顺序进行匹配
+        # 注意：先检查更具体的模式(三级标题)，再检查不太具体的模式(二级标题)，最后检查最不具体的模式(一级标题)
         
-        for i, line in enumerate(lines):
-            # 跳过当前行的标志
-            if skip_next:
-                skip_next = False
-                continue
-                
-            # 检测是否是与章节标题相似的标题行
-            stripped_line = line.strip()
-            if stripped_line.startswith(('#', '##', '###')) and clean_section_title in stripped_line:
-                skip_next = True  # 可能需要跳过下一行（空行）
-                continue
+        # 三级标题: 1.1.1 或 1.1.1. 等
+        if re.match(r'^\d+\.\d+\.\d+\.?\s', clean_title) or re.match(r'^\d+\.\d+\.\d+$', clean_title):
+            return 3
             
-            # 检测重复的子章节标题 (例如 ### 1.1 研究背景与意义)
-            if i > 0 and stripped_line.startswith('###') and any(
-                section_num in stripped_line for section_num in 
-                ['1.1', '1.2', '1.3', '2.1', '2.2', '2.3', '3.1', '3.2', '3.3']
-            ):
-                # 检查这是否是重复的子章节
-                for j in range(i-1):
-                    if any(section_num in lines[j] for section_num in ['1.1', '1.2', '1.3', '2.1', '2.2', '2.3', '3.1', '3.2', '3.3']):
-                        # 可能找到了重复的子章节，跳过这一部分直到下一个主要章节
-                        current_section_num = ''.join([c for c in stripped_line if c.isdigit() or c == '.'])[:3]
-                        next_section_start = i
-                        for k in range(i+1, len(lines)):
-                            next_line = lines[k].strip()
-                            if next_line.startswith(('#', '##', '###')) and current_section_num not in next_line:
-                                next_section_start = k
-                                break
-                        
-                        # 跳过到下一个章节
-                        if next_section_start > i:
-                            filtered_lines.extend(lines[next_section_start:])
-                            return '\n'.join(filtered_lines)
+        # 二级标题: 1.1 或 1.1. 等
+        if re.match(r'^\d+\.\d+\.?\s', clean_title) or re.match(r'^\d+\.\d+$', clean_title):
+            return 2
             
-            filtered_lines.append(line)
+        # 一级标题: 1. 或 1 或 一、 等
+        if re.match(r'^\d+\.?\s', clean_title) or re.match(r'^\d+$', clean_title) or \
+           re.match(r'^[一二三四五六七八九十]+、', clean_title) or \
+           re.match(r'^第[一二三四五六七八九十]+章', clean_title):
+            return 1
             
-        return '\n'.join(filtered_lines)
-    
+        # 第四级: (1) 或 （1） 等
+        if re.match(r'^\(\d+\)', clean_title) or re.match(r'^（\d+）', clean_title):
+            return 4
+            
+        # 第五级: a. 或 a) 等
+        if re.match(r'^[a-z]\)', clean_title) or re.match(r'^[a-z]\.\s', clean_title):
+            return 5
+            
+        # 无法识别层级，但可能为章节标题（例如"引言"、"结论"等）
+        if any(key_title in clean_title.lower() for key_title in ["引言", "绪论", "概述", "结论", "总结", "附录"]):
+            return 1
+            
+        # 无法识别层级
+        return 0
+
     def parse_toc(self, toc: str) -> List[str]:
         """
-        解析目录内容，提取章节标题
+        解析目录内容，提取章节标题列表
         
         参数:
             toc (str): 目录内容
@@ -450,7 +414,8 @@ class DeepSeekAI:
         返回:
             List[str]: 章节标题列表
         """
-        sections = []
+        # 获取所有章节标题
+        all_sections = []
         lines = toc.strip().split('\n')
         
         for line in lines:
@@ -461,150 +426,150 @@ class DeepSeekAI:
             # 跳过一些常见的非章节行
             if any(skip in line.lower() for skip in ['目录', 'contents', 'table of']):
                 continue
-                
-            # 尝试提取章节标题
-            # 通常章节会有编号如 "1. 引言" 或 "1.1 研究背景"
-            sections.append(line)
+            
+            # 添加章节到列表
+            all_sections.append(line)
         
-        return sections
+        return all_sections
 
-    
-    def generate_full_report_parallel(
+    def generate_full_report(
         self,
         topic: str,
         pages: int,
-        sections: list[str],
+        sections: List[str],
         toc: str,
-        format: str = "markdown",
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        max_workers: Optional[int] = None,
         **kwargs
     ) -> str:
         """
-        使用并行方式生成完整报告（纯并行 + 共享上下文）
+        生成完整报告（顺序执行版本）
         
         参数:
             topic (str): 报告主题
-            pages (int): 期望页数
-            sections (list[str]): 章节标题列表 
-            toc (str): 目录文本
-            format (str): 输出格式 ("markdown", "text")
-            progress_callback (callable, optional): 进度回调函数
-            max_workers (int, optional): 最大线程数
-            **kwargs: 传递给generate_text的其他参数
+            pages (int): 目标页数
+            sections (List[str]): 章节标题列表
+            toc (str): 目录内容
+            progress_callback (Optional[Callable]): 进度回调函数
+            **kwargs: 其他参数
             
         返回:
-            str: 报告全文内容
+            str: 完整的报告内容
         """
+        # 章节总数
         total_sections = len(sections)
         
         if total_sections == 0:
             return ""
-            
-        # 使用推荐的线程数
-        if max_workers is None:
-            workers = self.get_recommended_workers(task_count=total_sections)
-        else:
-            workers = max_workers
-            # 根据章节数量动态调整线程数，避免使用太多线程处理少量章节
-            if workers > total_sections:
-                adjusted_workers = max(1, total_sections)
-                console.print(f"[yellow]注意: 调整线程数从 {workers} 到 {adjusted_workers} (基于章节数)[/yellow]")
-                workers = adjusted_workers
         
-        # 显示报告生成信息
-        console.print(
-            f"[bold]开始生成报告[/bold]: {topic}\n"
-            f"目标页数: {pages} 页 | 章节数量: {total_sections} 个 | 并行线程: {workers} 个",
-            style="blue"
-        )
+        # 显示章节信息 - 避免与进度条冲突
+        if not progress_callback:
+            console.print(f"[blue]章节信息: 共 {total_sections} 个章节[/blue]")
+            console.print(
+                f"[bold]开始生成报告[/bold]: {topic}\n"
+                f"目标页数: {pages} 页 | 章节数量: {total_sections} 个",
+                style="blue"
+            )
+            console.print("[bold]开始顺序生成章节...[/bold]")
         
-        # 用于存储生成内容的线程安全字典和共享上下文
+        # 用于存储生成内容和进度
         section_results = {}
-        shared_context = []
+        shared_context = []  # 存储之前生成的章节内容
         completed_count = 0
-        lock = threading.RLock()
         
-        # 进度回调包装函数
-        def update_progress(section_index, section_title, content):
-            nonlocal completed_count
-            with lock:
-                section_results[section_index] = content
-                completed_count += 1
-                
-                # 触发用户提供的回调函数
-                if progress_callback:
-                    progress_callback(completed_count, total_sections, section_title)
-        
-        # 用于生成单个章节的线程函数
-        def generate_section_worker(index, title):
+        # 顺序生成所有章节
+        for index, section_title in enumerate(sections):
+            # 通知开始生成 - 当没有进度回调时才输出
+            if not progress_callback:
+                console.print(f"[cyan]开始生成[/cyan] 章节 [{index+1}/{total_sections}]: '{section_title}'")
+            
             try:
-                # 通知开始生成
-                with lock:
-                    console.print(f"[cyan]开始生成[/cyan] 第{index+1}章: '{title}'")
-                
-                # 复制当前上下文
-                with lock:
-                    previous_sections = shared_context.copy()
-                
                 # 生成章节内容
                 content = self.generate_report_section(
                     topic=topic,
-                    section_title=title,
+                    section_title=section_title,
                     toc=toc,
-                    format=format,
-                    previous_sections=previous_sections,
+                    previous_sections=shared_context,  # 传递之前生成的所有内容作为上下文
                     section_index=index,
                     total_sections=total_sections,
                     pages=pages,
                     **kwargs
                 )
                 
-                # 更新进度并存储结果
-                update_progress(index, title, content)
+                # 保存结果
+                section_results[index] = content
                 
-                # 更新共享上下文
-                with lock:
-                    shared_context.append(content)
-                    # 通知完成
-                    console.print(f"[green]完成生成[/green] 第{index+1}章: '{title}'")
+                # 更新共享上下文（添加新生成的内容）
+                shared_context.append(content)
                 
-                return content
+                # 更新进度
+                completed_count += 1
+                if progress_callback:
+                    progress_callback(completed_count, total_sections, section_title)
+                # 当没有进度回调时才输出完成信息
+                elif not progress_callback:
+                    console.print(f"[green]完成生成[/green] 章节 [{index+1}/{total_sections}]: '{section_title}'")
+                
             except Exception as e:
-                error_msg = f"生成章节 '{title}' 时出错: {str(e)}"
-                with lock:
-                    console.print(f"[bold red]错误[/bold red]: {error_msg}")
-                update_progress(index, title, f"[生成失败: {str(e)}]")
-                return f"[生成失败: {str(e)}]"
+                error_msg = f"生成章节 '{section_title}' 时出错: {str(e)}"
+                console.print(f"[bold red]错误[/bold red]: {error_msg}")
+                section_results[index] = f"[生成失败: {str(e)}]"
         
-        console.print("[bold]开始并行生成各章节...[/bold]")
+        # 显示完成信息 - 避免与进度条冲突
+        if not progress_callback:
+            console.print(f"[bold green]报告生成完成[/bold green]，共 {total_sections} 个章节", style="green")
         
-        # 完全并行生成所有章节
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = []
-            # 提交所有任务
-            for i, section_title in enumerate(sections):
-                future = executor.submit(generate_section_worker, i, section_title)
-                futures.append(future)
-            
-            # 等待所有任务完成
-            concurrent.futures.wait(futures)
-        
-        # 显示完成信息
-        console.print(f"[bold green]报告生成完成[/bold green]，共 {total_sections} 个章节", style="green")
-        
-        # 合并所有章节内容，按照原始顺序
+        # 合并所有章节内容，按照原始顺序，并添加正确格式的标题
         ordered_content = []
         for i in range(total_sections):
             if i in section_results:
-                ordered_content.append(section_results[i])
+                # 获取对应的章节标题
+                section_title = sections[i]
+                
+                # 根据章节标题格式确定标题级别
+                level = self.get_chapter_level(section_title)
+                
+                # 根据层级添加不同级别的Markdown标题
+                if level == 1:
+                    header = f"# {section_title}"
+                elif level == 2:
+                    header = f"## {section_title}"
+                elif level == 3:
+                    header = f"### {section_title}"
+                elif level == 4:
+                    header = f"#### {section_title}"
+                elif level == 5:
+                    header = f"##### {section_title}"
+                else:
+                    # 如果无法识别层级，尝试从标题中提取数字格式来判断
+                    # 例如 "1.2.3 标题" 可以提取出 "1.2.3"
+                    import re
+                    match = re.match(r'^(\d+(\.\d+)*)\.?\s', section_title)
+                    if match:
+                        # 计算点号的数量来确定层级
+                        level_nums = match.group(1).split('.')
+                        if len(level_nums) == 1:
+                            header = f"# {section_title}"
+                        elif len(level_nums) == 2:
+                            header = f"## {section_title}"
+                        elif len(level_nums) == 3:
+                            header = f"### {section_title}"
+                        else:
+                            header = f"#### {section_title}"
+                    else:
+                        # 默认使用一级标题
+                        header = f"# {section_title}"
+                
+                # 组合标题和内容
+                formatted_content = f"{header}\n\n{section_results[i]}"
+                ordered_content.append(formatted_content)
             else:
                 ordered_content.append(f"[章节 {i+1} 生成失败]")
         
         # 合并所有内容
-        report_content = "\n\n" + "\n\n".join(ordered_content)
+        report_content = "\n\n".join(ordered_content)
         
         return report_content
+
     
     def is_available(self) -> bool:
         """
@@ -638,32 +603,3 @@ class DeepSeekAI:
             recommended = min(recommended, task_count)
             
         return max(1, recommended)  # 至少返回1个线程
-
-# 使用示例
-if __name__ == "__main__":
-    try:
-        # 从环境变量获取API密钥或直接提供
-        # 使用自动线程数（基于CPU核心数）
-        ai = DeepSeekAI()  # 或 DeepSeekAI(api_key="your-api-key")
-        
-        # 也可以手动指定线程数
-        # ai = DeepSeekAI(max_workers=5)
-        
-        # 简单的生成测试
-        result = ai.generate_text("写一个Python递归函数计算斐波那契数列")
-        console.print(result["choices"][0]["message"]["content"], style="bold")
-        
-        # 多线程并行生成报告
-        # toc, report = ai.generate_full_report_parallel(
-        #     "人工智能在医疗领域的应用", 
-        #     pages=3,
-        #     # 可以为特定任务指定不同于实例化时的线程数
-        #     # max_workers=5,  
-        #     progress_callback=lambda i, total, section: print(f"生成进度: {i}/{total} - {section}")
-        # )
-        # console.print(toc, style="bold")
-        # console.print("\n\n--- 报告内容 ---\n\n", style="bold")
-        # console.print(report)
-        
-    except AIError as e:
-        console.print(f"错误: {e}", style="bold red")
